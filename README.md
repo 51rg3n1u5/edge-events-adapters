@@ -10,6 +10,11 @@ Parsers/adapters that convert common log sources into `events.jsonl` (schema v0)
 
 ### Auto-discovery (default)
 
+Auto flow:
+1) tries `nginx -T` to extract `access_log` paths
+2) falls back to common `/var/log/nginx|apache2|httpd` globs
+3) if still nothing, tries journald (`journalctl -u nginx --since "24 hours ago"`) and parses any access-log style lines
+
 ```bash
 PYTHONPATH=src python3 -m edge_events_adapters nginx \
   --asset edge-1 \

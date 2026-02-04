@@ -73,71 +73,71 @@ def _open_text_maybe_gzip(path: Path) -> TextIO:
     return path.open("r", encoding="utf-8", errors="ignore")
 
 
+def iter_access_events_from_lines(lines: Iterable[str]) -> Iterator[ParsedAccess]:
+    for line in lines:
+        line = line.strip("\n")
+        if not line.strip():
+            continue
+
+        # If JSON logs, accept them directly (best-effort)
+        if line.lstrip().startswith("{"):
+            try:
+                obj = json.loads(line)
+                ts = obj.get("time") or obj.get("ts") or obj.get("@timestamp")
+                if ts and isinstance(ts, str):
+                    # assume already ISO-ish
+                    iso = ts
+                else:
+                    iso = None
+                src = obj.get("remote_addr") or obj.get("src_ip") or obj.get("client_ip")
+                status = obj.get("status")
+                req = obj.get("request") or obj.get("req")
+                method = obj.get("method")
+                path = obj.get("uri") or obj.get("path")
+                if req and (not method or not path):
+                    mth, pth = _parse_request(str(req))
+                    method = method or mth
+                    path = path or pth
+                yield ParsedAccess(
+                    ts=iso or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    src_ip=str(src) if src else None,
+                    method=str(method) if method else None,
+                    path=str(path) if path else None,
+                    status=int(status) if isinstance(status, int) or (isinstance(status, str) and status.isdigit()) else None,
+                    bytes=_safe_int(str(obj.get("bytes") or obj.get("body_bytes_sent") or "")),
+                    ua=str(obj.get("http_user_agent") or obj.get("ua") or "") or None,
+                    referrer=str(obj.get("http_referer") or obj.get("referrer") or "") or None,
+                )
+                continue
+            except Exception:
+                pass
+
+        m = COMBINED_RE.match(line)
+        if not m:
+            continue
+
+        iso = _parse_timelocal(m.group("time"))
+        req = m.group("request")
+        method, path = _parse_request(req)
+
+        yield ParsedAccess(
+            ts=iso or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            src_ip=m.group("src_ip"),
+            method=method,
+            path=path,
+            status=_safe_int(m.group("status")),
+            bytes=_safe_int(m.group("bytes")),
+            ua=(m.group("ua") or None) if m.group("ua") != "-" else None,
+            referrer=(m.group("referrer") or None) if m.group("referrer") != "-" else None,
+        )
+
+
 def iter_access_events(
     paths: list[Path],
 ) -> Iterator[ParsedAccess]:
     for p in paths:
         with _open_text_maybe_gzip(p) as f:
-            for line in f:
-                line = line.strip("\n")
-                if not line.strip():
-                    continue
-
-                # If JSON logs, accept them directly (best-effort)
-                if line.lstrip().startswith("{"):
-                    try:
-                        obj = json.loads(line)
-                        ts = obj.get("time") or obj.get("ts") or obj.get("@timestamp")
-                        if ts and isinstance(ts, str):
-                            # assume already ISO-ish
-                            iso = ts
-                        else:
-                            iso = None
-                        src = obj.get("remote_addr") or obj.get("src_ip") or obj.get("client_ip")
-                        status = obj.get("status")
-                        req = obj.get("request") or obj.get("req")
-                        method = obj.get("method")
-                        path = obj.get("uri") or obj.get("path")
-                        if req and (not method or not path):
-                            mth, pth = _parse_request(str(req))
-                            method = method or mth
-                            path = path or pth
-                        yield ParsedAccess(
-                            ts=iso or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                            src_ip=str(src) if src else None,
-                            method=str(method) if method else None,
-                            path=str(path) if path else None,
-                            status=int(status) if isinstance(status, int) or (isinstance(status, str) and status.isdigit()) else None,
-                            bytes=_safe_int(str(obj.get("bytes") or obj.get("body_bytes_sent") or "")),
-                            ua=str(obj.get("http_user_agent") or obj.get("ua") or "") or None,
-                            referrer=str(obj.get("http_referer") or obj.get("referrer") or "") or None,
-                        )
-                        continue
-                    except Exception:
-                        pass
-
-                m = COMBINED_RE.match(line)
-                if not m:
-                    continue
-
-                iso = _parse_timelocal(m.group("time"))
-                req = m.group("request")
-                method, path = _parse_request(req)
-
-                user = m.group("user")
-                if user == "-":
-                    user = None
-
-                yield ParsedAccess(
-                    ts=iso or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    src_ip=m.group("src_ip"),
-                    method=method,
-                    path=path,
-                    status=_safe_int(m.group("status")),
-                    bytes=_safe_int(m.group("bytes")),
-                    ua=(m.group("ua") or None) if m.group("ua") != "-" else None,
-                    referrer=(m.group("referrer") or None) if m.group("referrer") != "-" else None,
-                )
+            yield from iter_access_events_from_lines(f)
 
 
 def write_events_jsonl(

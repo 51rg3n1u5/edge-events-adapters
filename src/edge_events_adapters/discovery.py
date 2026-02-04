@@ -25,6 +25,18 @@ DEFAULT_NGINX_GLOBS = [
     "/var/log/*nginx*access*.log*",
 ]
 
+
+def _dedup_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    out: list[Path] = []
+    for p in paths:
+        s = str(p)
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(p)
+    return out
+
 DEFAULT_APACHE_GLOBS = [
     "/var/log/apache2/access.log*",
     "/var/log/apache2/*access*.log*",
@@ -41,16 +53,7 @@ def _glob_many(globs: Iterable[str]) -> list[Path]:
                 paths.append(p)
         except Exception:
             continue
-    # de-dup while preserving order
-    seen: set[str] = set()
-    out: list[Path] = []
-    for p in paths:
-        s = str(p)
-        if s in seen:
-            continue
-        seen.add(s)
-        out.append(p)
-    return out
+    return _dedup_paths(paths)
 
 
 def discover_web_access_logs(
