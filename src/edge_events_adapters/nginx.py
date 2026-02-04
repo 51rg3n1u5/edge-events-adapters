@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, TextIO
 
+from .xff import pick_client_ip
+
 
 # Common NGINX/Apache combined log format:
 # $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for"
@@ -33,6 +35,7 @@ class ParsedAccess:
     bytes: int | None
     ua: str | None
     referrer: str | None
+    xff: str | None = None
 
 
 def _parse_timelocal(s: str) -> str | None:
@@ -98,6 +101,7 @@ def iter_access_events_from_lines(lines: Iterable[str]) -> Iterator[ParsedAccess
                     mth, pth = _parse_request(str(req))
                     method = method or mth
                     path = path or pth
+                xff = obj.get("http_x_forwarded_for") or obj.get("xff")
                 yield ParsedAccess(
                     ts=iso or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     src_ip=str(src) if src else None,
@@ -107,6 +111,7 @@ def iter_access_events_from_lines(lines: Iterable[str]) -> Iterator[ParsedAccess
                     bytes=_safe_int(str(obj.get("bytes") or obj.get("body_bytes_sent") or "")),
                     ua=str(obj.get("http_user_agent") or obj.get("ua") or "") or None,
                     referrer=str(obj.get("http_referer") or obj.get("referrer") or "") or None,
+                    xff=str(xff) if xff else None,
                 )
                 continue
             except Exception:
@@ -129,6 +134,7 @@ def iter_access_events_from_lines(lines: Iterable[str]) -> Iterator[ParsedAccess
             bytes=_safe_int(m.group("bytes")),
             ua=(m.group("ua") or None) if m.group("ua") != "-" else None,
             referrer=(m.group("referrer") or None) if m.group("referrer") != "-" else None,
+            xff=(m.group("xff") or None) if m.groupdict().get("xff") and m.group("xff") != "-" else None,
         )
 
 
@@ -155,7 +161,7 @@ def write_events_jsonl(
                 "ts": e.ts,
                 "asset_id": asset_id,
                 "event_type": "http_access",
-                "src_ip": e.src_ip,
+                "src_ip": pick_client_ip(e.src_ip, e.xff),
                 "method": e.method,
                 "object": e.path,
                 "status": e.status,

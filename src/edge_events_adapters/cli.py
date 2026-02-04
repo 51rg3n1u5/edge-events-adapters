@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .discovery import discover_web_access_logs
+from .apache_config import discover_access_logs_from_apache_config
 from .journald import iter_journal_lines
 from .nginx import iter_access_events, iter_access_events_from_lines, write_events_jsonl
 from .nginx_config import discover_access_logs_from_nginx_config
@@ -42,19 +43,26 @@ def cmd_web(args: argparse.Namespace) -> int:
             report_obj["mode"] = "nginx_config"
             report_obj["selected_files"] = [str(p) for p in paths]
         else:
-            # 2) default globs
-            paths, rep = discover_web_access_logs(
-                include_apache=True,
-                max_files=DEFAULT_MAX_FILES,
-                max_total_bytes=DEFAULT_MAX_TOTAL_BYTES,
-            )
-            report_obj["mode"] = "default_globs"
-            report_obj["glob_report"] = {
-                "found": [i.__dict__ for i in rep.found],
-                "skipped": [i.__dict__ for i in rep.skipped],
-                "errors": [i.__dict__ for i in rep.errors],
-            }
-            report_obj["selected_files"] = [str(p) for p in paths]
+            # 2) Apache config-derived
+            ap_paths = discover_access_logs_from_apache_config()
+            if ap_paths:
+                paths = ap_paths
+                report_obj["mode"] = "apache_config"
+                report_obj["selected_files"] = [str(p) for p in paths]
+            else:
+                # 3) default globs
+                paths, rep = discover_web_access_logs(
+                    include_apache=True,
+                    max_files=DEFAULT_MAX_FILES,
+                    max_total_bytes=DEFAULT_MAX_TOTAL_BYTES,
+                )
+                report_obj["mode"] = "default_globs"
+                report_obj["glob_report"] = {
+                    "found": [i.__dict__ for i in rep.found],
+                    "skipped": [i.__dict__ for i in rep.skipped],
+                    "errors": [i.__dict__ for i in rep.errors],
+                }
+                report_obj["selected_files"] = [str(p) for p in paths]
 
         # 3) journald fallback (default on)
         if not paths and not args.no_journal:
