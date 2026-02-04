@@ -1,0 +1,1 @@
+time=2026-02-04T20:10:00Z src=10.0.0.5 dst=198.51.100.9 dpt=443 action=allow

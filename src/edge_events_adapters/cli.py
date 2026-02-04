@@ -8,6 +8,8 @@ from .discovery import discover_web_access_logs
 from .alb import iter_alb_events as iter_alb_events, write_events_jsonl as write_alb_events_jsonl
 from .alb_discovery import discover_alb_logs
 from .apache_config import discover_access_logs_from_apache_config
+from .firewall import iter_firewall_events, write_events_jsonl as write_firewall_events_jsonl
+from .firewall_discovery import discover_firewall_logs
 from .journald import iter_journal_lines
 from .nginx import iter_access_events, iter_access_events_from_lines, write_events_jsonl
 from .nginx_config import discover_access_logs_from_nginx_config
@@ -129,6 +131,33 @@ def cmd_alb(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_firewall(args: argparse.Namespace) -> int:
+    out_events = Path(args.out)
+    report_path = Path(args.report) if args.report else _default_report_path(out_events)
+
+    if args.input:
+        paths = [Path(p) for p in args.input]
+        mode = "explicit"
+    else:
+        roots = [Path(r) for r in (args.root or ["."])]
+        paths = discover_firewall_logs(roots=roots)
+        mode = "auto"
+
+    if not paths:
+        report_path.write_text(json.dumps({"mode": mode, "selected_files": []}, indent=2) + "\n", encoding="utf-8")
+        raise SystemExit("firewall: no logs discovered. Provide --in explicitly or set --root.")
+
+    n = write_firewall_events_jsonl(out_events, asset_id=args.asset, events=iter_firewall_events(paths))
+    report_path.write_text(
+        json.dumps({"mode": mode, "selected_files": [str(p) for p in paths], "events_written": n}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    if not args.quiet:
+        print(f"firewall: wrote {n} events to {out_events} (report: {report_path})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="edge-events-adapters")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -152,6 +181,15 @@ def main(argv: list[str] | None = None) -> int:
     alb.add_argument("--report", required=False, help="write discovery report JSON here (default: alongside --out)")
     alb.add_argument("--quiet", action="store_true")
     alb.set_defaults(func=cmd_alb)
+
+    fw = sub.add_parser("firewall", help="Collect firewall/flow logs -> network_flow events (auto-discovery under cwd by default)")
+    fw.add_argument("--asset", required=True, help="asset_id")
+    fw.add_argument("--out", required=True, help="output events.jsonl path")
+    fw.add_argument("--in", dest="input", required=False, action="append", help="explicit log path (repeatable), overrides auto")
+    fw.add_argument("--root", required=False, action="append", help="auto-discovery root directory (repeatable, default: .)")
+    fw.add_argument("--report", required=False, help="write discovery report JSON here (default: alongside --out)")
+    fw.add_argument("--quiet", action="store_true")
+    fw.set_defaults(func=cmd_firewall)
 
     args = p.parse_args(argv)
     return int(args.func(args))

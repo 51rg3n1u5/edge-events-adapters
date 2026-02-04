@@ -42,5 +42,21 @@ PYTHONPATH=src python3 -m edge_events_adapters alb --asset edge-aws --out alb.ev
 PYTHONPATH=src python3 -m edge_events_adapters alb --asset edge-aws --out alb.events.jsonl
 ```
 
+### Firewall / flow logs (best-effort)
+
+```bash
+# Explicit
+PYTHONPATH=src python3 -m edge_events_adapters firewall --asset edge-1 --out fw.events.jsonl --in /path/to/fw.log
+
+# Auto-discovery under current directory (or add --root)
+PYTHONPATH=src python3 -m edge_events_adapters firewall --asset edge-1 --out fw.events.jsonl
+```
+
+Supports:
+- JSON lines (common key variants)
+- key=value syslog-ish lines (`src=... dst=... dpt=... action=...`)
+- CEF lines (best-effort)
+- CSV with common column names (src/dst/port/action)
+
 A discovery report is written next to the output by default:
 - `*.jsonl` → `*.discovery.json`
