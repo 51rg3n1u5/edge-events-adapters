@@ -9,5 +9,15 @@ Parsers/adapters that convert common log sources into `events.jsonl` (schema v0)
 ## Run (dev)
 
 ```bash
-PYTHONPATH=src python3 -m edge_events_adapters nginx --in /var/log/nginx/access.log --asset edge-1 --out events.jsonl
+PYTHONPATH=src python3 -m edge_events_adapters nginx \
+  --in /var/log/nginx/access.log \
+  --asset edge-1 \
+  --out events.jsonl
+
+# supports rotated gzip logs as additional --in inputs
+PYTHONPATH=src python3 -m edge_events_adapters nginx \
+  --in /var/log/nginx/access.log \
+  --in /var/log/nginx/access.log.1.gz \
+  --asset edge-1 \
+  --out events.jsonl
 ```
