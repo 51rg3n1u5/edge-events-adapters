@@ -2,8 +2,8 @@
 
 Parsers/adapters that convert common log sources into `events.jsonl` (schema v0) for `triage-events`.
 
-## Targets (initial)
-- NGINX/Apache access logs
+## Targets
+- Web access logs (NGINX/Apache)
 - AWS ALB access logs
 
 ## Run (dev)
@@ -14,6 +14,8 @@ Auto flow:
 1) tries `nginx -T` to extract `access_log` paths
 2) falls back to common `/var/log/nginx|apache2|httpd` globs
 3) if still nothing, tries journald (`journalctl -u nginx --since "24 hours ago"`) and parses any access-log style lines
+
+### Web access logs (auto by default)
 
 ```bash
 # Zero-config default
@@ -30,5 +32,15 @@ PYTHONPATH=src python3 -m edge_events_adapters web \
   --out events.jsonl
 ```
 
+### AWS ALB access logs
+
+```bash
+# Explicit
+PYTHONPATH=src python3 -m edge_events_adapters alb --asset edge-aws --out alb.events.jsonl --in /path/to/alb.log
+
+# Auto-discovery under current directory (or add --root)
+PYTHONPATH=src python3 -m edge_events_adapters alb --asset edge-aws --out alb.events.jsonl
+```
+
 A discovery report is written next to the output by default:
-- `events.jsonl` → `events.discovery.json`
+- `*.jsonl` → `*.discovery.json`
