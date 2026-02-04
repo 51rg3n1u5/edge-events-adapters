@@ -10,62 +10,84 @@ from .nginx import iter_access_events, iter_access_events_from_lines, write_even
 from .nginx_config import discover_access_logs_from_nginx_config
 
 
-def cmd_nginx(args: argparse.Namespace) -> int:
-    paths: list[Path]
+DEFAULT_LOOKBACK = "72 hours ago"
+DEFAULT_MAX_FILES = 25
+DEFAULT_MAX_TOTAL_BYTES = 500 * 1024 * 1024
 
-    discovery_mode = "explicit" if args.input else "auto"
 
-    report_obj: dict | None = None
+def _default_report_path(out_events: Path) -> Path:
+    # events.jsonl -> events.discovery.json (or add suffix)
+    if out_events.name.endswith(".jsonl"):
+        return out_events.with_name(out_events.name.replace(".jsonl", ".discovery.json"))
+    return out_events.with_suffix(out_events.suffix + ".discovery.json")
 
+
+def cmd_web(args: argparse.Namespace) -> int:
+    out_events = Path(args.out)
+    report_path = Path(args.report) if args.report else _default_report_path(out_events)
+
+    paths: list[Path] = []
+    report_obj: dict = {"mode": None, "selected_files": [], "journal_fallback": None}
+
+    # 0) Explicit inputs override auto
     if args.input:
         paths = [Path(p) for p in args.input]
+        report_obj["mode"] = "explicit"
+        report_obj["selected_files"] = [str(p) for p in paths]
     else:
-        # 1) Prefer config-derived paths (more accurate)
+        # 1) NGINX config-derived
         cfg_paths = discover_access_logs_from_nginx_config()
         if cfg_paths:
             paths = cfg_paths
-            report_obj = {"mode": "nginx_config", "paths": [str(p) for p in paths]}
+            report_obj["mode"] = "nginx_config"
+            report_obj["selected_files"] = [str(p) for p in paths]
         else:
-            # 2) Fallback to common default globs
-            paths, report = discover_web_access_logs(
+            # 2) default globs
+            paths, rep = discover_web_access_logs(
                 include_apache=True,
-                max_files=args.max_files,
-                max_total_bytes=args.max_total_bytes,
+                max_files=DEFAULT_MAX_FILES,
+                max_total_bytes=DEFAULT_MAX_TOTAL_BYTES,
             )
-            report_obj = {
-                "mode": "default_globs",
-                "found": [i.__dict__ for i in report.found],
-                "skipped": [i.__dict__ for i in report.skipped],
-                "errors": [i.__dict__ for i in report.errors],
+            report_obj["mode"] = "default_globs"
+            report_obj["glob_report"] = {
+                "found": [i.__dict__ for i in rep.found],
+                "skipped": [i.__dict__ for i in rep.skipped],
+                "errors": [i.__dict__ for i in rep.errors],
             }
+            report_obj["selected_files"] = [str(p) for p in paths]
 
-        # 3) Final fallback: journald (if file logs not present)
-        if not paths and args.journal_fallback:
-            # Try to parse access-log style lines out of journald output.
-            journal_lines = iter_journal_lines(unit=args.journal_unit, since=args.since)
-            events = iter_access_events_from_lines(journal_lines)
-            n = write_events_jsonl(Path(args.out), asset_id=args.asset, events=events, host=args.host)
-            if args.discovery_report and report_obj is not None:
-                report_obj["journal_fallback"] = {"unit": args.journal_unit, "since": args.since, "events_written": n}
-                Path(args.discovery_report).write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
+        # 3) journald fallback (default on)
+        if not paths and not args.no_journal:
+            # try common units
+            units = ["nginx", "apache2", "httpd"]
+            all_events = []
+            used_unit = None
+            for u in units:
+                lines = iter_journal_lines(unit=u, since=args.since)
+                evs = list(iter_access_events_from_lines(lines))
+                if evs:
+                    all_events = evs
+                    used_unit = u
+                    break
+            n = write_events_jsonl(out_events, asset_id=args.asset, events=all_events, host=args.host)
+            report_obj["journal_fallback"] = {"used_unit": used_unit, "since": args.since, "events_written": n}
+            report_path.write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
             if not args.quiet:
-                print(f"auto-discovery: journald fallback wrote {n} events to {args.out}")
+                print(f"web: journald fallback wrote {n} events to {out_events}")
             return 0
 
         if not paths:
-            raise SystemExit("No access logs discovered. Provide --in explicitly, adjust limits, or enable journald fallback.")
+            report_path.write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
+            raise SystemExit("web: no access logs discovered (and journald produced none). Provide --in explicitly.")
 
-    if args.discovery_report and report_obj is not None:
-        Path(args.discovery_report).write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
-
+    # File-based path
     events = iter_access_events(paths)
-    n = write_events_jsonl(Path(args.out), asset_id=args.asset, events=events, host=args.host)
+    n = write_events_jsonl(out_events, asset_id=args.asset, events=events, host=args.host)
+    report_obj["events_written"] = n
+    report_path.write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
 
     if not args.quiet:
-        if discovery_mode == "auto":
-            print(f"auto-discovered {len(paths)} files, wrote {n} events to {args.out}")
-        else:
-            print(f"wrote {n} events to {args.out}")
+        print(f"web: wrote {n} events to {out_events} (report: {report_path})")
     return 0
 
 
@@ -73,21 +95,18 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="edge-events-adapters")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    ng = sub.add_parser("nginx", help="Parse nginx/apache access logs -> events.jsonl")
-    ng.add_argument("--in", dest="input", required=False, action="append", help="input access log path (repeatable). Supports .gz. If omitted, auto-discovery is used.")
-    ng.add_argument("--asset", required=True, help="asset_id")
-    ng.add_argument("--out", required=True, help="output events.jsonl path")
-    ng.add_argument("--host", required=False, help="optional host/vhost to stamp on events")
-    ng.add_argument("--max-files", type=int, default=25, help="auto-discovery cap")
-    ng.add_argument("--max-total-bytes", type=int, default=500 * 1024 * 1024, help="auto-discovery cap")
-    ng.add_argument("--discovery-report", required=False, help="write discovery report JSON here")
-    ng.add_argument("--no-journal-fallback", dest="journal_fallback", action="store_false", default=True, help="disable journald fallback")
-    ng.add_argument("--journal-unit", default="nginx", help="journald unit name (default: nginx)")
-    ng.add_argument("--since", default="24 hours ago", help="journald lookback window (default: 24 hours ago)")
-    ng.add_argument("--quiet", action="store_true")
-    ng.set_defaults(func=cmd_nginx)
+    web = sub.add_parser("web", help="Collect web access events (auto-discovery by default)")
+    web.add_argument("--asset", required=True, help="asset_id")
+    web.add_argument("--out", required=True, help="output events.jsonl path")
+    web.add_argument("--since", default=DEFAULT_LOOKBACK, help="journald lookback window (default: 72 hours ago)")
+    web.add_argument("--host", required=False, help="optional host/vhost to stamp on events")
+    web.add_argument("--in", dest="input", required=False, action="append", help="explicit log path (repeatable), overrides auto")
+    web.add_argument("--report", required=False, help="write discovery report JSON here (default: alongside --out)")
+    web.add_argument("--no-journal", action="store_true", help="disable journald fallback")
+    web.add_argument("--quiet", action="store_true")
+    web.set_defaults(func=cmd_web)
 
-    # TODO: implement
+    # Keep placeholders for future sources
     alb = sub.add_parser("alb", help="Parse AWS ALB access logs -> events.jsonl (TODO)")
     alb.set_defaults(func=lambda _args: (_ for _ in ()).throw(SystemExit("alb parser not implemented yet")))
 

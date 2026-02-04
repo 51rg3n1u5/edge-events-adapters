@@ -16,18 +16,19 @@ Auto flow:
 3) if still nothing, tries journald (`journalctl -u nginx --since "24 hours ago"`) and parses any access-log style lines
 
 ```bash
-PYTHONPATH=src python3 -m edge_events_adapters nginx \
-  --asset edge-1 \
-  --out events.jsonl \
-  --discovery-report discovery_report.json
-```
+# Zero-config default
+PYTHONPATH=src python3 -m edge_events_adapters web --asset edge-1 --out events.jsonl
 
-### Explicit inputs (override auto-discovery)
+# Optional: widen/narrow journald lookback
+PYTHONPATH=src python3 -m edge_events_adapters web --asset edge-1 --out events.jsonl --since "24 hours ago"
 
-```bash
-PYTHONPATH=src python3 -m edge_events_adapters nginx \
+# Optional: explicit paths override auto-discovery
+PYTHONPATH=src python3 -m edge_events_adapters web \
   --in /var/log/nginx/access.log \
   --in /var/log/nginx/access.log.1.gz \
   --asset edge-1 \
   --out events.jsonl
 ```
+
+A discovery report is written next to the output by default:
+- `events.jsonl` → `events.discovery.json`
