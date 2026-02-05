@@ -19,10 +19,19 @@ class DiscoveryReport:
 
 
 DEFAULT_NGINX_GLOBS = [
+    # Vanilla nginx
     "/var/log/nginx/access.log*",
     "/var/log/nginx/*access*.log*",
     "/var/log/nginx/*access*",
     "/var/log/*nginx*access*.log*",
+
+    # GitLab omnibus ships its own nginx logs here
+    "/var/log/gitlab/nginx/gitlab_access.log*",
+    "/var/log/gitlab/nginx/*access*.log*",
+
+    # Common app server access log naming (Tomcat-style)
+    "/opt/atlassian/**/logs/localhost_access_log*.txt*",
+    "/var/atlassian/**/logs/localhost_access_log*.txt*",
 ]
 
 
@@ -42,6 +51,10 @@ DEFAULT_APACHE_GLOBS = [
     "/var/log/apache2/*access*.log*",
     "/var/log/httpd/access_log*",
     "/var/log/httpd/*access*.log*",
+
+    # Generic patterns that appear on some vendor packages
+    "/var/log/*/access.log*",
+    "/var/log/*/*access*.log*",
 ]
 
 
