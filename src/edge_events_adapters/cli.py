@@ -202,15 +202,36 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         # Merge in deterministic order
         merged_n = merge_jsonl(out_events, [web_out, alb_out, fw_out])
 
+        # Simple coverage summary (for IR usability)
+        bundle_items = [
+            {"name": "web", **web_rep, "out": str(web_out)},
+            {"name": "alb", **alb_rep, "out": str(alb_out)},
+            {"name": "firewall", **fw_rep, "out": str(fw_out)},
+        ]
+
+        gaps = []
+        for it in bundle_items:
+            if int(it.get("events_written") or 0) == 0:
+                gaps.append(it["name"])
+
+        coverage_text = [
+            f"asset: {args.asset}",
+            f"merged_events: {merged_n}",
+            "sources:",
+        ]
+        for it in bundle_items:
+            coverage_text.append(f"- {it['name']}: {int(it.get('events_written') or 0)} events (mode={it.get('mode')})")
+        if gaps:
+            coverage_text.append("coverage_gaps:")
+            coverage_text.append("- missing_or_empty: " + ", ".join(gaps))
+
         rep = {
-            "bundle": [
-                {"name": "web", **web_rep, "out": str(web_out)},
-                {"name": "alb", **alb_rep, "out": str(alb_out)},
-                {"name": "firewall", **fw_rep, "out": str(fw_out)},
-            ],
+            "bundle": bundle_items,
             "merged": {"out": str(out_events), "events_written": merged_n},
+            "coverage": {"gaps": gaps, "summary_txt": str(out_events.with_suffix(out_events.suffix + ".coverage.txt"))},
         }
         report_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+        out_events.with_suffix(out_events.suffix + ".coverage.txt").write_text("\n".join(coverage_text) + "\n", encoding="utf-8")
 
     if not args.quiet:
         print(f"bundle: wrote {merged_n} events to {out_events} (report: {report_path})")
