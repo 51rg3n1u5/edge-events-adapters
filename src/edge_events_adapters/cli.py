@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 
 from .discovery import discover_web_access_logs
@@ -11,6 +12,7 @@ from .apache_config import discover_access_logs_from_apache_config
 from .firewall import iter_firewall_events, write_events_jsonl as write_firewall_events_jsonl
 from .firewall_discovery import discover_firewall_logs
 from .journald import iter_journal_lines
+from .merge import merge_jsonl
 from .nginx import iter_access_events, iter_access_events_from_lines, write_events_jsonl
 from .nginx_config import discover_access_logs_from_nginx_config
 
@@ -27,34 +29,30 @@ def _default_report_path(out_events: Path) -> Path:
     return out_events.with_suffix(out_events.suffix + ".discovery.json")
 
 
-def cmd_web(args: argparse.Namespace) -> int:
-    out_events = Path(args.out)
-    report_path = Path(args.report) if args.report else _default_report_path(out_events)
+def collect_web_events(*, asset_id: str, out_events: Path, since: str, host: str | None, explicit_inputs: list[str] | None, no_journal: bool) -> dict:
+    """Collect web access events into out_events. Returns report dict."""
 
-    paths: list[Path] = []
     report_obj: dict = {"mode": None, "selected_files": [], "journal_fallback": None}
 
-    # 0) Explicit inputs override auto
-    if args.input:
-        paths = [Path(p) for p in args.input]
+    paths: list[Path] = []
+
+    if explicit_inputs:
+        paths = [Path(p) for p in explicit_inputs]
         report_obj["mode"] = "explicit"
         report_obj["selected_files"] = [str(p) for p in paths]
     else:
-        # 1) NGINX config-derived
         cfg_paths = discover_access_logs_from_nginx_config()
         if cfg_paths:
             paths = cfg_paths
             report_obj["mode"] = "nginx_config"
             report_obj["selected_files"] = [str(p) for p in paths]
         else:
-            # 2) Apache config-derived
             ap_paths = discover_access_logs_from_apache_config()
             if ap_paths:
                 paths = ap_paths
                 report_obj["mode"] = "apache_config"
                 report_obj["selected_files"] = [str(p) for p in paths]
             else:
-                # 3) default globs
                 paths, rep = discover_web_access_logs(
                     include_apache=True,
                     max_files=DEFAULT_MAX_FILES,
@@ -68,93 +66,154 @@ def cmd_web(args: argparse.Namespace) -> int:
                 }
                 report_obj["selected_files"] = [str(p) for p in paths]
 
-        # 3) journald fallback (default on)
-        if not paths and not args.no_journal:
-            # try common units
+        if not paths and not no_journal:
             units = ["nginx", "apache2", "httpd"]
             all_events = []
             used_unit = None
             for u in units:
-                lines = iter_journal_lines(unit=u, since=args.since)
+                lines = iter_journal_lines(unit=u, since=since)
                 evs = list(iter_access_events_from_lines(lines))
                 if evs:
                     all_events = evs
                     used_unit = u
                     break
-            n = write_events_jsonl(out_events, asset_id=args.asset, events=all_events, host=args.host)
-            report_obj["journal_fallback"] = {"used_unit": used_unit, "since": args.since, "events_written": n}
-            report_path.write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
-            if not args.quiet:
-                print(f"web: journald fallback wrote {n} events to {out_events}")
-            return 0
+            n = write_events_jsonl(out_events, asset_id=asset_id, events=all_events, host=host)
+            report_obj["journal_fallback"] = {"used_unit": used_unit, "since": since, "events_written": n}
+            report_obj["events_written"] = n
+            return report_obj
 
         if not paths:
-            report_path.write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
-            raise SystemExit("web: no access logs discovered (and journald produced none). Provide --in explicitly.")
+            report_obj["events_written"] = 0
+            return report_obj
 
-    # File-based path
-    events = iter_access_events(paths)
-    n = write_events_jsonl(out_events, asset_id=args.asset, events=events, host=args.host)
+    n = write_events_jsonl(out_events, asset_id=asset_id, events=iter_access_events(paths), host=host)
     report_obj["events_written"] = n
-    report_path.write_text(json.dumps(report_obj, indent=2) + "\n", encoding="utf-8")
+    return report_obj
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    out_events = Path(args.out)
+    report_path = Path(args.report) if args.report else _default_report_path(out_events)
+
+    rep = collect_web_events(
+        asset_id=args.asset,
+        out_events=out_events,
+        since=args.since,
+        host=args.host,
+        explicit_inputs=args.input,
+        no_journal=args.no_journal,
+    )
+    report_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
 
     if not args.quiet:
-        print(f"web: wrote {n} events to {out_events} (report: {report_path})")
+        print(f"web: wrote {rep.get('events_written', 0)} events to {out_events} (report: {report_path})")
     return 0
+
+
+def collect_alb_events(*, asset_id: str, out_events: Path, explicit_inputs: list[str] | None, roots: list[str] | None) -> dict:
+    report: dict = {"mode": None, "selected_files": [], "events_written": 0}
+
+    if explicit_inputs:
+        paths = [Path(p) for p in explicit_inputs]
+        report["mode"] = "explicit"
+    else:
+        rts = [Path(r) for r in (roots or ["."])]
+        paths = discover_alb_logs(roots=rts)
+        report["mode"] = "auto"
+
+    if not paths:
+        return report
+
+    n = write_alb_events_jsonl(out_events, asset_id=asset_id, events=iter_alb_events(paths))
+    report["selected_files"] = [str(p) for p in paths]
+    report["events_written"] = n
+    return report
 
 
 def cmd_alb(args: argparse.Namespace) -> int:
     out_events = Path(args.out)
     report_path = Path(args.report) if args.report else _default_report_path(out_events)
 
-    if args.input:
-        paths = [Path(p) for p in args.input]
-        mode = "explicit"
+    rep = collect_alb_events(asset_id=args.asset, out_events=out_events, explicit_inputs=args.input, roots=args.root)
+    report_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+    if not args.quiet:
+        print(f"alb: wrote {rep.get('events_written', 0)} events to {out_events} (report: {report_path})")
+    return 0
+
+
+def collect_firewall_events(*, asset_id: str, out_events: Path, explicit_inputs: list[str] | None, roots: list[str] | None) -> dict:
+    report: dict = {"mode": None, "selected_files": [], "events_written": 0}
+
+    if explicit_inputs:
+        paths = [Path(p) for p in explicit_inputs]
+        report["mode"] = "explicit"
     else:
-        # auto-discover under cwd (or given roots)
-        roots = [Path(r) for r in (args.root or ["."])]
-        paths = discover_alb_logs(roots=roots)
-        mode = "auto"
+        rts = [Path(r) for r in (roots or ["."])]
+        paths = discover_firewall_logs(roots=rts)
+        report["mode"] = "auto"
 
     if not paths:
-        report_path.write_text(json.dumps({"mode": mode, "selected_files": []}, indent=2) + "\n", encoding="utf-8")
-        raise SystemExit("alb: no ALB logs discovered. Provide --in explicitly or set --root.")
+        return report
 
-    n = write_alb_events_jsonl(out_events, asset_id=args.asset, events=iter_alb_events(paths))
-    report_path.write_text(
-        json.dumps({"mode": mode, "selected_files": [str(p) for p in paths], "events_written": n}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-    if not args.quiet:
-        print(f"alb: wrote {n} events to {out_events} (report: {report_path})")
-    return 0
+    n = write_firewall_events_jsonl(out_events, asset_id=asset_id, events=iter_firewall_events(paths))
+    report["selected_files"] = [str(p) for p in paths]
+    report["events_written"] = n
+    return report
 
 
 def cmd_firewall(args: argparse.Namespace) -> int:
     out_events = Path(args.out)
     report_path = Path(args.report) if args.report else _default_report_path(out_events)
 
-    if args.input:
-        paths = [Path(p) for p in args.input]
-        mode = "explicit"
-    else:
-        roots = [Path(r) for r in (args.root or ["."])]
-        paths = discover_firewall_logs(roots=roots)
-        mode = "auto"
-
-    if not paths:
-        report_path.write_text(json.dumps({"mode": mode, "selected_files": []}, indent=2) + "\n", encoding="utf-8")
-        raise SystemExit("firewall: no logs discovered. Provide --in explicitly or set --root.")
-
-    n = write_firewall_events_jsonl(out_events, asset_id=args.asset, events=iter_firewall_events(paths))
-    report_path.write_text(
-        json.dumps({"mode": mode, "selected_files": [str(p) for p in paths], "events_written": n}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    rep = collect_firewall_events(asset_id=args.asset, out_events=out_events, explicit_inputs=args.input, roots=args.root)
+    report_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
 
     if not args.quiet:
-        print(f"firewall: wrote {n} events to {out_events} (report: {report_path})")
+        print(f"firewall: wrote {rep.get('events_written', 0)} events to {out_events} (report: {report_path})")
+    return 0
+
+
+def cmd_bundle(args: argparse.Namespace) -> int:
+    """Run a sensible default bundle: web + alb + firewall, then merge to one events.jsonl.
+
+    Minimal knobs: asset_id, out path, optional since.
+    """
+
+    out_events = Path(args.out)
+    report_path = Path(args.report) if args.report else _default_report_path(out_events)
+
+    with tempfile.TemporaryDirectory(prefix="edge-events-") as td:
+        tdir = Path(td)
+        web_out = tdir / "web.jsonl"
+        alb_out = tdir / "alb.jsonl"
+        fw_out = tdir / "firewall.jsonl"
+
+        web_rep = collect_web_events(
+            asset_id=args.asset,
+            out_events=web_out,
+            since=args.since,
+            host=None,
+            explicit_inputs=None,
+            no_journal=args.no_journal,
+        )
+        alb_rep = collect_alb_events(asset_id=args.asset, out_events=alb_out, explicit_inputs=None, roots=args.root)
+        fw_rep = collect_firewall_events(asset_id=args.asset, out_events=fw_out, explicit_inputs=None, roots=args.root)
+
+        # Merge in deterministic order
+        merged_n = merge_jsonl(out_events, [web_out, alb_out, fw_out])
+
+        rep = {
+            "bundle": [
+                {"name": "web", **web_rep, "out": str(web_out)},
+                {"name": "alb", **alb_rep, "out": str(alb_out)},
+                {"name": "firewall", **fw_rep, "out": str(fw_out)},
+            ],
+            "merged": {"out": str(out_events), "events_written": merged_n},
+        }
+        report_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+
+    if not args.quiet:
+        print(f"bundle: wrote {merged_n} events to {out_events} (report: {report_path})")
     return 0
 
 
@@ -190,6 +249,16 @@ def main(argv: list[str] | None = None) -> int:
     fw.add_argument("--report", required=False, help="write discovery report JSON here (default: alongside --out)")
     fw.add_argument("--quiet", action="store_true")
     fw.set_defaults(func=cmd_firewall)
+
+    bun = sub.add_parser("bundle", help="Run web+alb+firewall collectors and merge into one events.jsonl")
+    bun.add_argument("--asset", required=True, help="asset_id")
+    bun.add_argument("--out", required=True, help="output merged events.jsonl path")
+    bun.add_argument("--since", default=DEFAULT_LOOKBACK, help="journald lookback for web collector (default: 72 hours ago)")
+    bun.add_argument("--root", required=False, action="append", help="roots for alb/firewall auto-discovery (repeatable, default: .)")
+    bun.add_argument("--report", required=False, help="write bundle report JSON here (default: alongside --out)")
+    bun.add_argument("--no-journal", action="store_true", help="disable journald fallback for web collector")
+    bun.add_argument("--quiet", action="store_true")
+    bun.set_defaults(func=cmd_bundle)
 
     args = p.parse_args(argv)
     return int(args.func(args))
