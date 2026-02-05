@@ -9,6 +9,8 @@ from .discovery import discover_web_access_logs
 from .alb import iter_alb_events as iter_alb_events, write_events_jsonl as write_alb_events_jsonl
 from .alb_discovery import discover_alb_logs
 from .apache_config import discover_access_logs_from_apache_config
+from .app_discovery import discover_app_logs
+from .app_logs import iter_app_events, write_events_jsonl as write_app_events_jsonl
 from .firewall import iter_firewall_events, write_events_jsonl as write_firewall_events_jsonl
 from .firewall_discovery import discover_firewall_logs
 from .journald import iter_journal_lines
@@ -173,8 +175,23 @@ def cmd_firewall(args: argparse.Namespace) -> int:
     return 0
 
 
+def collect_app_events(*, asset_id: str, out_events: Path) -> dict:
+    paths, rep = discover_app_logs()
+    report: dict = {"mode": "auto", "selected_files": [str(p) for p in paths], "events_written": 0}
+    report["glob_report"] = {
+        "found": [i.__dict__ for i in rep.found],
+        "skipped": [i.__dict__ for i in rep.skipped],
+        "errors": [i.__dict__ for i in rep.errors],
+    }
+    if not paths:
+        return report
+    n = write_app_events_jsonl(out_events, asset_id=asset_id, events=iter_app_events(paths))
+    report["events_written"] = n
+    return report
+
+
 def cmd_bundle(args: argparse.Namespace) -> int:
-    """Run a sensible default bundle: web + alb + firewall, then merge to one events.jsonl.
+    """Run a sensible default bundle: web + alb + firewall + app_logs, then merge to one events.jsonl.
 
     Minimal knobs: asset_id, out path, optional since.
     """
@@ -187,6 +204,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         web_out = tdir / "web.jsonl"
         alb_out = tdir / "alb.jsonl"
         fw_out = tdir / "firewall.jsonl"
+        app_out = tdir / "app.jsonl"
 
         web_rep = collect_web_events(
             asset_id=args.asset,
@@ -198,15 +216,17 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         )
         alb_rep = collect_alb_events(asset_id=args.asset, out_events=alb_out, explicit_inputs=None, roots=args.root)
         fw_rep = collect_firewall_events(asset_id=args.asset, out_events=fw_out, explicit_inputs=None, roots=args.root)
+        app_rep = collect_app_events(asset_id=args.asset, out_events=app_out)
 
         # Merge in deterministic order
-        merged_n = merge_jsonl(out_events, [web_out, alb_out, fw_out])
+        merged_n = merge_jsonl(out_events, [web_out, alb_out, fw_out, app_out])
 
         # Simple coverage summary (for IR usability)
         bundle_items = [
             {"name": "web", **web_rep, "out": str(web_out)},
             {"name": "alb", **alb_rep, "out": str(alb_out)},
             {"name": "firewall", **fw_rep, "out": str(fw_out)},
+            {"name": "app", **app_rep, "out": str(app_out)},
         ]
 
         gaps = []
