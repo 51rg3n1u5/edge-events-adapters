@@ -58,5 +58,20 @@ Supports:
 - CEF lines (best-effort)
 - CSV with common column names (src/dst/port/action)
 
+### Syslog / remote logs (best-effort)
+
+```bash
+# Zero-config: auto-discover common syslog files and remote fanout dirs under /var/log
+PYTHONPATH=src python3 -m edge_events_adapters syslog --asset edge-1 --out syslog.events.jsonl
+
+# Explicit
+PYTHONPATH=src python3 -m edge_events_adapters syslog --asset edge-1 --out syslog.events.jsonl --in /var/log/syslog
+```
+
+Emits (best-effort, low noise):
+- `network_flow` when `src=... dst=... dpt=... action=...` is present
+- `dns` when lines look like queries/questions (qname + client ip)
+- `auth` when lines look like login success/fail (e.g. sshd)
+
 A discovery report is written next to the output by default:
 - `*.jsonl` → `*.discovery.json`
