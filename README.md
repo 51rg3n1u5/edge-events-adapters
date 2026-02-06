@@ -58,6 +58,19 @@ Supports:
 - CEF lines (best-effort)
 - CSV with common column names (src/dst/port/action)
 
+### DNS logs (best-effort)
+
+```bash
+# Zero-config: auto-discover common BIND/unbound/dnsmasq/pihole log paths
+PYTHONPATH=src python3 -m edge_events_adapters dns --asset edge-1 --out dns.events.jsonl
+
+# Explicit
+PYTHONPATH=src python3 -m edge_events_adapters dns --asset edge-1 --out dns.events.jsonl --in /var/log/named/query.log
+```
+
+Emits:
+- `dns` events (qname + client ip) for common BIND/unbound/dnsmasq formats.
+
 ### Syslog / remote logs (best-effort)
 
 ```bash

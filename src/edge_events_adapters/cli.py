@@ -17,6 +17,8 @@ from .journald import iter_journal_lines
 from .merge import merge_jsonl
 from .nginx import iter_access_events, iter_access_events_from_lines, write_events_jsonl
 from .nginx_config import discover_access_logs_from_nginx_config
+from .dns import iter_dns_events, write_events_jsonl as write_dns_events_jsonl
+from .dns_discovery import discover_dns_logs
 from .syslog import iter_syslog_events, write_events_jsonl as write_syslog_events_jsonl
 from .syslog_discovery import discover_syslog_files
 
@@ -217,6 +219,43 @@ def collect_syslog_events(*, asset_id: str, out_events: Path, explicit_inputs: l
     return report
 
 
+def collect_dns_events(*, asset_id: str, out_events: Path, explicit_inputs: list[str] | None) -> dict:
+    report: dict = {"mode": None, "selected_files": [], "events_written": 0}
+
+    if explicit_inputs:
+        paths = [Path(p) for p in explicit_inputs]
+        report["mode"] = "explicit"
+        report["selected_files"] = [str(p) for p in paths]
+    else:
+        paths, rep = discover_dns_logs()
+        report["mode"] = "auto"
+        report["selected_files"] = [str(p) for p in paths]
+        report["glob_report"] = {
+            "found": [i.__dict__ for i in rep.found],
+            "skipped": [i.__dict__ for i in rep.skipped],
+            "errors": [i.__dict__ for i in rep.errors],
+        }
+
+    if not paths:
+        return report
+
+    n = write_dns_events_jsonl(out_events, asset_id=asset_id, events=iter_dns_events(paths))
+    report["events_written"] = n
+    return report
+
+
+def cmd_dns(args: argparse.Namespace) -> int:
+    out_events = Path(args.out)
+    report_path = Path(args.report) if args.report else _default_report_path(out_events)
+
+    rep = collect_dns_events(asset_id=args.asset, out_events=out_events, explicit_inputs=args.input)
+    report_path.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+
+    if not args.quiet:
+        print(f"dns: wrote {rep.get('events_written', 0)} events to {out_events} (report: {report_path})")
+    return 0
+
+
 def cmd_syslog(args: argparse.Namespace) -> int:
     out_events = Path(args.out)
     report_path = Path(args.report) if args.report else _default_report_path(out_events)
@@ -230,7 +269,7 @@ def cmd_syslog(args: argparse.Namespace) -> int:
 
 
 def cmd_bundle(args: argparse.Namespace) -> int:
-    """Run a sensible default bundle: web + alb + firewall + app_logs + syslog, then merge to one events.jsonl.
+    """Run a sensible default bundle: web + alb + firewall + app_logs + syslog + dns, then merge to one events.jsonl.
 
     Minimal knobs: asset_id, out path, optional since.
     """
@@ -245,6 +284,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         fw_out = tdir / "firewall.jsonl"
         app_out = tdir / "app.jsonl"
         sys_out = tdir / "syslog.jsonl"
+        dns_out = tdir / "dns.jsonl"
 
         web_rep = collect_web_events(
             asset_id=args.asset,
@@ -258,9 +298,10 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         fw_rep = collect_firewall_events(asset_id=args.asset, out_events=fw_out, explicit_inputs=None, roots=args.root)
         app_rep = collect_app_events(asset_id=args.asset, out_events=app_out)
         sys_rep = collect_syslog_events(asset_id=args.asset, out_events=sys_out, explicit_inputs=None)
+        dns_rep = collect_dns_events(asset_id=args.asset, out_events=dns_out, explicit_inputs=None)
 
         # Merge in deterministic order
-        merged_n = merge_jsonl(out_events, [web_out, alb_out, fw_out, app_out, sys_out])
+        merged_n = merge_jsonl(out_events, [web_out, alb_out, fw_out, app_out, sys_out, dns_out])
 
         # Simple coverage summary (for IR usability)
         bundle_items = [
@@ -269,6 +310,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
             {"name": "firewall", **fw_rep, "out": str(fw_out)},
             {"name": "app", **app_rep, "out": str(app_out)},
             {"name": "syslog", **sys_rep, "out": str(sys_out)},
+            {"name": "dns", **dns_rep, "out": str(dns_out)},
         ]
 
         gaps = []
@@ -333,6 +375,14 @@ def main(argv: list[str] | None = None) -> int:
     fw.add_argument("--quiet", action="store_true")
     fw.set_defaults(func=cmd_firewall)
 
+    dn = sub.add_parser("dns", help="Collect DNS query logs -> dns events (auto-discovery by default)")
+    dn.add_argument("--asset", required=True, help="asset_id")
+    dn.add_argument("--out", required=True, help="output events.jsonl path")
+    dn.add_argument("--in", dest="input", required=False, action="append", help="explicit DNS log file path(s), overrides auto")
+    dn.add_argument("--report", required=False, help="write discovery report JSON here (default: alongside --out)")
+    dn.add_argument("--quiet", action="store_true")
+    dn.set_defaults(func=cmd_dns)
+
     sy = sub.add_parser("syslog", help="Collect syslog/remote logs -> auth/dns/network_flow events (auto-discovery by default)")
     sy.add_argument("--asset", required=True, help="asset_id")
     sy.add_argument("--out", required=True, help="output events.jsonl path")
@@ -341,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
     sy.add_argument("--quiet", action="store_true")
     sy.set_defaults(func=cmd_syslog)
 
-    bun = sub.add_parser("bundle", help="Run web+alb+firewall+app+syslog collectors and merge into one events.jsonl")
+    bun = sub.add_parser("bundle", help="Run web+alb+firewall+app+syslog+dns collectors and merge into one events.jsonl")
     bun.add_argument("--asset", required=True, help="asset_id")
     bun.add_argument("--out", required=True, help="output merged events.jsonl path")
     bun.add_argument("--since", default=DEFAULT_LOOKBACK, help="journald lookback for web collector (default: 72 hours ago)")
